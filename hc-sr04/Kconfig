@@ -1,0 +1,49 @@
+menuconfig HCSR04
+	bool "HCSR04 Distance Measurement Sensor"
+	depends on I2C && HAS_DTS_I2C
+	help
+	  Enable driver for HCSR04 distance measurement sensor.
+
+if HCSR04
+
+config HCSR04_DEV0_TRIGGER_PIN
+	int
+	depends on GPIO
+	default 4
+	help
+		HCSR0 trigger pin.
+
+config HCSR04_DEV1_TRIGGER_PIN
+	int
+	depends on GPIO
+	default 2
+	help
+		HCSR1 trigger pin.
+
+
+config HCSR04_DEV0_ECHO_PIN
+	int
+	depends on GPIO
+	default 6
+	help
+		HCSR0 echo pin.
+
+config HCSR04_DEV1_ECHO_PIN
+	int
+	depends on GPIO
+	default 7
+	help
+		HCSR1 echo pin.
+
+config HCSR04_0_NAME
+	string "Driver Name"
+	default "HCSR04_DW_0"
+	help
+	  Name of the first HCSR04 device as exposed to the kernel
+
+config HCSR04_1_NAME
+	string "Driver Name"
+	default "HCSR04_DW_1"
+	help
+	  Name of the second HCSR04 device as exposed to the kernel
+endif # HCSR04

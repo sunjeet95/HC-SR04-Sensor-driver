@@ -1,0 +1,1171 @@
+diff -Naur ./old_zephyr/drivers/sensor/CMakeLists.txt ./zephyr/drivers/sensor/CMakeLists.txt
+--- ./old_zephyr/drivers/sensor/CMakeLists.txt	2021-03-05 22:52:14.280754025 -0700
++++ ./zephyr/drivers/sensor/CMakeLists.txt	2021-03-02 21:56:51.222308000 -0700
+@@ -48,5 +48,6 @@
+ add_subdirectory_ifdef(CONFIG_TMP007		tmp007)
+ add_subdirectory_ifdef(CONFIG_TMP112		tmp112)
+ add_subdirectory_ifdef(CONFIG_VL53L0X		vl53l0x)
++add_subdirectory_ifdef(CONFIG_HCSR04		hc-sr04)
+ 
+ zephyr_sources_ifdef(CONFIG_USERSPACE sensor_handlers.c)
+diff -Naur ./old_zephyr/drivers/sensor/hc-sr04/CMakeLists.txt ./zephyr/drivers/sensor/hc-sr04/CMakeLists.txt
+--- ./old_zephyr/drivers/sensor/hc-sr04/CMakeLists.txt	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/drivers/sensor/hc-sr04/CMakeLists.txt	2021-02-20 03:27:27.909883000 -0700
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: Apache-2.0
++
++zephyr_library()
++
++zephyr_library_sources(hcsr04.c)
++
+diff -Naur ./old_zephyr/drivers/sensor/hc-sr04/hcsr04.c ./zephyr/drivers/sensor/hc-sr04/hcsr04.c
+--- ./old_zephyr/drivers/sensor/hc-sr04/hcsr04.c	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/drivers/sensor/hc-sr04/hcsr04.c	2021-03-05 21:16:58.574172000 -0700
+@@ -0,0 +1,449 @@
++//Jai Shri Ram // Om Hum Hanumate Namah
++
++// Sunjeet Jena
++// CSE522 Real Time Embedded Systems Spring 2021 - Arizona State University
++// Assignment 2
++#include <i2c.h>
++#include <init.h>
++#include <misc/__assert.h>
++#include <misc/byteorder.h>
++#include <sensor.h>
++#include <string.h>
++#include <pinmux.h>
++#include <logging/log.h>
++#include <gpio.h>
++#include <pwm.h>
++#include "hcsr04.h"
++#include <misc/printk.h>
++#include "../boards/x86/galileo/board.h"
++#include "../boards/x86/galileo/pinmux_galileo.h"
++#include "../drivers/gpio/gpio_dw_registers.h"
++#include "../drivers/gpio/gpio_dw.h"
++#include <stdlib.h>
++
++#define DEBUG 
++
++#if defined(DEBUG) 
++	#define DPRINTK(fmt, args...) printk("DEBUG: %s():%d: " fmt, \
++   		 __func__, __LINE__, ##args)
++#else
++ 	#define DPRINTK(fmt, args...) /* do nothing if not defined*/
++#endif
++
++#define EDGE_FALLING    (GPIO_INT_EDGE | GPIO_INT_ACTIVE_LOW)
++#define EDGE_RISING		(GPIO_INT_EDGE | GPIO_INT_ACTIVE_HIGH)
++
++/* change this to enable pull-up/pull-down */
++#define PULL_UP 0
++
++/* Sleep time */
++#define SLEEP_TIME	1000
++
++//Defining the Thread Priority and the Stack Size
++#define MY_STACK_SIZE 1024
++
++
++//--------------------------Variables Initialization/Declaration Space -------------------------------------------------------------
++static struct gpio_callback gpio_cb_0;		// Declaring Call back struct for the echo interrupt of HCSR0 device 
++static struct gpio_callback gpio_cb_1;		// Declaring Call back struct for the echo interrupt of HCSR1 device
++// static struct device* gpio_echo_0;		// Variable to get the device binding to be used for interrupt callback of HCSR0 device
++// static struct device* gpio_echo_1;			// Variable to get the device binding to be used for interrupt callback of HCSR1 device
++static struct device* pinmux; 				// Variable to store pointer to the PINMUX device
++static struct device* gpiob;				// Variable to store pointer to the GPIO_DW device
++
++//----------------------------------------------------------------------------------------------------------------------------------
++
++// RDTSC Function to get Time Stamp-------------------------------------------
++static __inline__ unsigned long long rdtsc(void){
++    unsigned int hi, lo;
++    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
++    return (((unsigned long long)lo) | (((unsigned long long)hi) << 32));
++}
++//---------------------------------------------------------------------------
++
++
++// --------------------Defining Function for Echo Interrupt Callback ------------------------ 
++void echo_interrupt_cb(struct device *gpiob, struct gpio_callback *cb, u32_t pins){
++
++	// Reading Time Stamp of the echo interrupt Callback;
++	u32_t timeStamp=rdtsc();
++	// Declaring the required variables
++	int ret;
++
++	// Read the value of the Input that caused the interrupt
++	u32_t val;
++
++	// Variable for the echo pin
++	u32_t e_pin;
++
++	// Declaring the variables to store pointer to device struct
++	struct device *dev;
++
++	// Device Selection based on which pin caused the interrupt
++	if(cb->pin_mask==BIT(CONFIG_HCSR04_DEV0_ECHO_PIN)){
++		
++		// Getting the device binding to HCSR1
++		dev=device_get_binding(CONFIG_HCSR04_0_NAME);
++
++		// Reading the pin val
++		gpio_pin_read(gpiob, CONFIG_HCSR04_DEV0_ECHO_PIN, &val);
++		
++		// Getting the echo pin for HCSR0 Device
++		e_pin=CONFIG_HCSR04_DEV0_ECHO_PIN;
++
++	}
++	else{
++		// Getting the device binding to HCSR1
++		dev=device_get_binding(CONFIG_HCSR04_1_NAME);
++		
++		// Reading the pin val
++		gpio_pin_read(gpiob, CONFIG_HCSR04_DEV1_ECHO_PIN, &val);
++
++		// Getting the echo pin for HCSR1 Device
++		e_pin=CONFIG_HCSR04_DEV1_ECHO_PIN;
++	}
++	
++	// Getting the pointer to the driver data
++	struct hcsr_data* dev_data=dev->driver_data;
++
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_config=dev->config;
++	// Getiing the address to HCSR device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_config->config_info;
++
++
++	// If val==1, the interrupt was caused by a rising edge.
++	if(val==1){
++		// printk("Rising Edge Interrupt was detected \n");
++		// If rising edge interrupt was detected we configure the pin to take a falling edge interrupt the next time
++		dev_data->data1=timeStamp;
++		ret=gpio_pin_configure(gpiob, e_pin, GPIO_DIR_IN | GPIO_INT | EDGE_FALLING ); 
++		if(ret<0){
++			DPRINTK("Failed to Configure %d GPIO PIN during Echo Interrupt Callback: While Reconfiguring from EDGE_RISING to EDGE_FALLING.\n", e_pin);
++			return;
++		}
++	}
++	// Otherwise, the interrupt was caused by a falling edge
++	else{
++		dev_data->data2=timeStamp;
++		// printk("Falling Edge Interrupt was detected \n");
++		// If falling edge interrupt was detected we configure the pin to take a rising edge interrupt the next time
++		ret=gpio_pin_configure(gpiob, e_pin, GPIO_DIR_IN | GPIO_INT | EDGE_RISING  ); 
++		if(ret<0){
++			DPRINTK("Failed to Configure %d GPIO PIN during Echo Interrupt Callback: While Reconfiguring from EDGE_FALLING to EDGE_RISING.\n", e_pin);
++			return;
++		}
++
++		// Time difference in cycles
++		u32_t timeDiff=dev_data->data2 - dev_data->data1;
++
++		//Time difference in microseconds
++		timeDiff=timeDiff/400;
++
++		// Calculating the distance in Centimeters
++		u32_t dist_= timeDiff/58;
++
++		// Storing the distance in centimeters
++		dev_data->distance = dist_;
++
++		k_sem_give(&(dev_config_info->device_sem));
++	}
++}
++//--------------------Initialization Function for HCSR0 device------------------------------------------
++
++static int HCSR0_init(struct device *dev){
++	// printk("HCSR0 device initialized. \n");
++
++	//Setting the variables to read returns
++	int ret;
++
++	//Getting the address to the HCSR0 device config struct
++	struct device_config* dev_config=dev->config;
++
++	// Getiing the address to HCSR0 device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_config->config_info;
++
++	//Getting the trigger pin and the echo pin;
++	u32_t t_pin=dev_config_info->triggerPin;	//Trigger Pin
++	u32_t e_pin=dev_config_info->echoPin;		//Echo Pin
++
++	//Getting the PINMUX related data and Binding
++	pinmux=device_get_binding(CONFIG_PINMUX_NAME);
++	struct galileo_data *pinmux_data = pinmux->driver_data;
++
++	//retrieving gpio_dw driver struct from pinmux driver
++	gpiob=pinmux_data->gpio_dw; 
++
++	// Storing the pointer to the GPIO device driver to the HCSR0 configuration information
++	dev_config_info->gpiob_trigger=gpiob;
++
++	//Condition to handle NULL Pointer
++	if(gpiob==NULL){
++		DPRINTK("Error getting pointer to GPIO_DW during HCSR0 device Initialization\n");
++		return -1;
++	}
++	//Setting up the trigger pin with the pinmux
++	ret=pinmux_pin_set(pinmux, 1, PINMUX_FUNC_A); // IO 1 -- GPIO4;
++
++	//Condition to handle Error
++	if(ret<0){
++		DPRINTK("Error setting IO1 to GPIO4 during HCSR0 device Initialization\n");
++		return -1;
++	}
++
++	//Setting up the echo pin with the pinmux
++	ret=pinmux_pin_set(pinmux, 3, PINMUX_FUNC_B); // IO 3 -- GPIO6;
++	//Condition to handle Error
++	if(ret<0){
++		DPRINTK("Error setting IO3 to GPIO6 during HCSR0 device Initialization.\n");
++		return -1;
++
++	}
++
++	//Configuring the echo pin to take inputs with a RISING EDGE
++	ret=gpio_pin_configure(gpiob, e_pin, PULL_UP| GPIO_DIR_IN | GPIO_INT | EDGE_RISING); 
++	if(ret<0){
++		DPRINTK("Error Configuring Echo Pin during HCSR0 device Initialization.\n");
++		return -1;
++	}
++	
++	// Storing the pointer to the GPIO device driver of the echo pin to the HCSR1 configuration information
++	dev_config_info->gpiob_echo=gpiob;
++
++	// Initializing the class back for the echo pin
++	gpio_init_callback(&gpio_cb_0, echo_interrupt_cb, BIT(e_pin));
++
++	//Adding the Callback to the GPIO device
++	ret=gpio_add_callback(gpiob, &gpio_cb_0);
++	if(ret<0){
++		DPRINTK("Error Adding Callback to the Echo Pin during HCSR0 device Initialization.\n");
++		return -1;
++	}
++	// Enabling the Callback for the echo pin
++	ret=gpio_pin_enable_callback(gpiob, e_pin);
++	if(ret<0){
++		DPRINTK("Error Enabling Calling Back to %d PIN during HCSR0 device Initialization\n", e_pin);
++		return -1;
++	}
++	return 0;
++}
++
++//------------------------------------------------------------------------------------------------------
++
++//--------------------Initialization Function for HCSR1 device------------------------------------------
++static int HCSR1_init(struct device *dev){
++	// printk("HCSR1 device initialized. \n");
++
++	//Setting the variables to read returns
++	int ret;
++
++	//Getting the address to the HCSR1 device config struct
++	struct device_config* dev_config=dev->config;
++
++	// Getiing the address to HCSR1 device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_config->config_info;
++
++	//Getting the trigger pin and the echo pin;
++	u32_t t_pin=dev_config_info->triggerPin;	//Trigger Pin
++	u32_t e_pin=dev_config_info->echoPin;		//Echo Pin
++
++	//Getting the PINMUX related data and Binding
++	pinmux=device_get_binding(CONFIG_PINMUX_NAME);
++	struct galileo_data *pinmux_data = pinmux->driver_data;
++	//retrieving gpio_dw driver struct from pinmux driver
++	gpiob=pinmux_data->gpio_dw; 
++
++	// Storing the pointer to the GPIO device driver to the HCSR1 configuration information
++	dev_config_info->gpiob_trigger=gpiob;
++
++	//Condition to handle NULL Pointer
++	if(gpiob==NULL){
++		DPRINTK("Error getting pointer to GPIO_DW during HCSR1 device Initialization\n");
++		return -1;
++	}
++	//Setting up the trigger pin with the pinmux
++	ret=pinmux_pin_set(pinmux, 10, PINMUX_FUNC_A); // IO 10 -- GPIO2;
++
++	//Condition to handle Error
++	if(ret<0){
++		DPRINTK("Error setting IO10 to GPIO2 during HCSR1 device Initialization\n");
++		return -1;
++	}
++
++	//Setting up the echo pin with the pinmux
++	ret=pinmux_pin_set(pinmux, 12, PINMUX_FUNC_B); // IO 12 -- GPIO7;
++	//Condition to handle Error
++	if(ret<0){
++		DPRINTK("Error setting IO12 to GPIO7 during HCSR1 device Initialization.\n");
++		return -1;
++
++	}
++
++	//Configuring the echo pin to take inputs with a RISING EDGE
++	ret=gpio_pin_configure(gpiob, e_pin, PULL_UP| GPIO_DIR_IN | GPIO_INT | EDGE_RISING); 
++	if(ret<0){
++		DPRINTK("Error Configuring Echo Pin during HCSR1 device Initialization\n");
++		return -1;
++	}
++	
++	// Storing the pointer to the GPIO device driver of the echo pin to the HCSR1 configuration information
++	dev_config_info->gpiob_echo=gpiob;
++
++	// Initializing the class back for the echo pin
++	gpio_init_callback(&gpio_cb_1, echo_interrupt_cb, BIT(e_pin));
++
++	//Adding the Callback to the GPIO device
++	ret=gpio_add_callback(gpiob, &gpio_cb_1);
++	if(ret<0){
++		DPRINTK("Error Adding Callback to the Echo Pin during HCSR1 device Initialization.\n");
++		return -1;
++	}
++	// Enabling the Callback for the echo pin
++	ret=gpio_pin_enable_callback(gpiob, e_pin);
++	if(ret<0){
++		DPRINTK("Error Enabling Calling Back to %d PIN during HCSR1 device Initialization\n", e_pin);
++		return -1;
++	}
++
++	return 0;
++}
++//------------------------------------------------------------------------------------------------------------
++
++//------------------------Defining the API Functions----------------------------------------------------------
++static inline int hcsr04_sample_fetch(struct device *dev, enum sensor_channel chan){
++	// printk("sample_fetch was called\n");
++
++	// Variable to check return values
++	int ret;
++
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_Config=dev->config;
++
++	// Getiing the address to HCSR device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_Config->config_info;
++
++
++	// Getting the Pointer to the device data
++	struct hcsr_data* dev_data=dev->driver_data;
++
++
++	// Initializing the semaphore for the current device . Will be taken by the channel_get function and given by the FALLING Edge Interrupt
++	k_sem_init(&(dev_config_info->device_sem), 0, 1);
++
++	//----------------------------------------------
++	// Getting the trigger pin variable of the device and writing to the trigger PIN
++	u32_t t_Pin= dev_config_info->triggerPin;
++
++	// Writing on the the respective trigger Pin
++	// "dev_config_info->gpiob_trigger" is the pointer to the respective GPIO device pointer stored in device configuration data  
++	ret=gpio_pin_write(dev_config_info->gpiob_trigger, t_Pin, 1);
++	k_busy_wait(10);
++	ret=gpio_pin_write(dev_config_info->gpiob_trigger, t_Pin, 0);
++	// Condtion for handling error
++	if(ret<0){
++		DPRINTK("Error writing to %d PIN during hcsr04_sample_fetch operation in device:%s \n", dev_config_info->triggerPin, dev_Config->name);
++		return -1;
++	}
++
++	return 0;
++}
++
++static inline int  hcsr04_channel_get(struct device *dev, enum sensor_channel chan, struct sensor_value* sense_val){
++
++	// Declaring a Variable to handle returns
++	int ret;
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_Config=dev->config;
++	// Getiing the address to HCSR device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_Config->config_info;
++
++	// Getting the Pointer to the device data
++	struct hcsr_data* dev_data=dev->driver_data;
++
++	// Waiting for the Semaphore from interrupt trigger till timeout limit
++	if(k_sem_take(&(dev_config_info->device_sem), dev_data->timeout_ms)!=0){
++
++		// Resetting the Echo Pin of the device to take Rising Edge Input ( Because we are inherently stopping the current measurement and resetting the pin for the next measurement)
++		ret=gpio_pin_configure(dev_config_info->gpiob_echo, dev_config_info->echoPin, GPIO_DIR_IN | GPIO_INT | EDGE_RISING ); 
++
++		// Condition to handle Error
++		if(ret<0){
++			DPRINTK("Failed to Configure %d GPIO PIN during hcsr04_channel_get() function: While Reconfiguring from EDGE_FALLING to EDGE_RISING for device %s \n",  dev_config_info->echoPin, dev_Config->name);
++		}
++		// Resetting the Device Buffer;
++		dev_data->data1=0;
++		dev_data->data2=0;
++		return -1;
++	}
++	else{
++
++		// 	Storing the distance in the sensor_val struct object
++		sense_val->val1=dev_data->distance;
++
++		//	Storing the timestamp of the collected sample in clock cycles
++		sense_val->val2= dev_data->data1;
++
++		// Resetting the Device Buffer;
++		dev_data->data1=0;
++		dev_data->data2=0;
++		dev_data->distance=0;
++	return 0;
++	}
++}
++
++static inline int  hcsr04_attr_set(struct device *dev, enum sensor_channel chan, enum sensor_attribute sensorAttr, const struct sensor_value *sensor_val){
++
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_Config=dev->config;
++	// Getiing the address to HCSR device config_data struct(hcsr_config_data type); 
++	struct hcsr_config_data* dev_config_info=dev_Config->config_info;
++
++	// Getting the Pointer to the device data
++	struct hcsr_data* dev_data=dev->driver_data;
++	// Setting the timeout parameter of the device  in milliseconds
++	dev_data->timeout_ms = (sensor_val->val1)/1000;
++
++	// printk("%d", dev_data->timeout_ms);
++	return 0;
++}
++
++//-------------------------------------FILLING UP THE DEVICE FUNCTION API--------------------------------
++static struct sensor_driver_api hcsr04_driver_api={
++	.sample_fetch= hcsr04_sample_fetch,
++	.channel_get= hcsr04_channel_get,
++	.attr_set= hcsr04_attr_set
++};
++
++//----------------- Filling the configuration data of both the sensor devices----------------------------
++// Please see the hcsr04.h header file for entire device configuration information structure-------------
++struct hcsr_config_data hcsr0_config_data={
++
++	.triggerPin=CONFIG_HCSR04_DEV0_TRIGGER_PIN,
++	.echoPin=CONFIG_HCSR04_DEV0_ECHO_PIN
++};
++
++struct hcsr_config_data hcsr1_config_data={
++	
++	.triggerPin=CONFIG_HCSR04_DEV1_TRIGGER_PIN,
++	.echoPin=CONFIG_HCSR04_DEV1_ECHO_PIN
++};
++
++// -----------------------------------------------------------------------------------------------------
++// Initializing the device data values to zeroes 
++struct hcsr_data hcsr0_driver={
++	.data1=0,
++	.data2=0,
++};
++struct hcsr_data hcsr1_driver={
++	.data1=0,
++	.data2=0,
++};
++//-------------------------------------------------------------------------------------------------------
++// HCSR0 and HCSR1 device API initialization
++DEVICE_AND_API_INIT(HCSR0, CONFIG_HCSR04_0_NAME, HCSR0_init, &hcsr0_driver,
++		    &hcsr0_config_data, APPLICATION, 6,
++		    &hcsr04_driver_api);
++
++DEVICE_AND_API_INIT(HCSR1, CONFIG_HCSR04_1_NAME, HCSR1_init, &hcsr1_driver,
++		    &hcsr1_config_data, APPLICATION, 6,
++		    &hcsr04_driver_api);
+diff -Naur ./old_zephyr/drivers/sensor/hc-sr04/hcsr04.h ./zephyr/drivers/sensor/hc-sr04/hcsr04.h
+--- ./old_zephyr/drivers/sensor/hc-sr04/hcsr04.h	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/drivers/sensor/hc-sr04/hcsr04.h	2021-03-05 19:11:58.716443000 -0700
+@@ -0,0 +1,34 @@
++//Jai Shri Ram // Om Hum Hanumate Namah
++
++// Sunjeet Jena
++// CSE522 Real Time Embedded Systems Spring 2021 - Arizona State University
++// Assignment 2
++#ifndef ZEPHYR_DRIVERS_SENSOR_HCSR04
++#define ZEPHYR_DRIVERS_SENSOR_HCSR04
++
++#include <device.h>
++#include <misc/util.h>
++#include <zephyr/types.h>
++#include <gpio.h>
++
++// Device Data Structure
++struct hcsr_data {
++	u64_t data1; 		//Rising Edge Time Stamp of the Echo
++	u64_t data2;		//Falling Edge Time Stamp of the Echo
++	u32_t distance;		// Distance in centemeters
++	int timeout_ms;		//Variable to store timeout parameter in milliseconds
++};
++
++
++// Device Coniguration Data  Structure
++struct hcsr_config_data{
++
++	u32_t triggerPin;				//Trigger Pin
++	u32_t echoPin;					//Echo Pin
++	struct device *gpiob_trigger;	//Pointer to the device of the trigger pin
++	struct device *gpiob_echo;		//Pointer to the device of the echo pin
++	
++	struct k_sem device_sem;		//Semaphore for transition from Falling Edge Interrupt to the callback
++
++};
++#endif
+diff -Naur ./old_zephyr/drivers/sensor/hc-sr04/Kconfig ./zephyr/drivers/sensor/hc-sr04/Kconfig
+--- ./old_zephyr/drivers/sensor/hc-sr04/Kconfig	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/drivers/sensor/hc-sr04/Kconfig	2021-03-04 03:38:26.130615000 -0700
+@@ -0,0 +1,49 @@
++menuconfig HCSR04
++	bool "HCSR04 Distance Measurement Sensor"
++	depends on I2C && HAS_DTS_I2C
++	help
++	  Enable driver for HCSR04 distance measurement sensor.
++
++if HCSR04
++
++config HCSR04_DEV0_TRIGGER_PIN
++	int
++	depends on GPIO
++	default 4
++	help
++		HCSR0 trigger pin.
++
++config HCSR04_DEV1_TRIGGER_PIN
++	int
++	depends on GPIO
++	default 2
++	help
++		HCSR1 trigger pin.
++
++
++config HCSR04_DEV0_ECHO_PIN
++	int
++	depends on GPIO
++	default 6
++	help
++		HCSR0 echo pin.
++
++config HCSR04_DEV1_ECHO_PIN
++	int
++	depends on GPIO
++	default 7
++	help
++		HCSR1 echo pin.
++
++config HCSR04_0_NAME
++	string "Driver Name"
++	default "HCSR04_DW_0"
++	help
++	  Name of the first HCSR04 device as exposed to the kernel
++
++config HCSR04_1_NAME
++	string "Driver Name"
++	default "HCSR04_DW_1"
++	help
++	  Name of the second HCSR04 device as exposed to the kernel
++endif # HCSR04
+diff -Naur ./old_zephyr/drivers/sensor/Kconfig ./zephyr/drivers/sensor/Kconfig
+--- ./old_zephyr/drivers/sensor/Kconfig	2021-03-05 22:52:14.280754025 -0700
++++ ./zephyr/drivers/sensor/Kconfig	2021-02-20 02:36:18.408184000 -0700
+@@ -121,4 +121,6 @@
+ 
+ source "drivers/sensor/vl53l0x/Kconfig"
+ 
++source "drivers/sensor/hc-sr04/Kconfig"
++
+ endif # SENSOR
+diff -Naur ./old_zephyr/samples/HCSR_app/CMakeLists.txt ./zephyr/samples/HCSR_app/CMakeLists.txt
+--- ./old_zephyr/samples/HCSR_app/CMakeLists.txt	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/samples/HCSR_app/CMakeLists.txt	2021-02-20 03:20:22.363188000 -0700
+@@ -0,0 +1,9 @@
++set(IS_TEST 1)
++
++cmake_minimum_required(VERSION 3.13.1)
++include($ENV{ZEPHYR_BASE}/cmake/app/boilerplate.cmake NO_POLICY_SCOPE)
++project(HCSR_04)
++
++FILE(GLOB app_sources src/main.c)
++target_sources(app PRIVATE ${app_sources})
++target_compile_options(app PRIVATE -Wall)
+diff -Naur ./old_zephyr/samples/HCSR_app/prj.conf ./zephyr/samples/HCSR_app/prj.conf
+--- ./old_zephyr/samples/HCSR_app/prj.conf	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/samples/HCSR_app/prj.conf	2021-03-04 03:05:59.930092000 -0700
+@@ -0,0 +1,13 @@
++CONFIG_PRINTK=y
++CONFIG_SHELL=y
++CONFIG_KERNEL_SHELL=y
++CONFIG_THREAD_MONITOR=y
++CONFIG_INIT_STACKS=y
++CONFIG_THREAD_NAME=y
++CONFIG_DEVICE_SHELL=y
++CONFIG_BOOT_BANNER=n
++CONFIG_LOG=y
++CONFIG_PWM=y
++CONFIG_HCSR04=y
++CONFIG_SENSOR=y
++# CONFIG_OBJECT_TRACING=y
+diff -Naur ./old_zephyr/samples/HCSR_app/Readme.md ./zephyr/samples/HCSR_app/Readme.md
+--- ./old_zephyr/samples/HCSR_app/Readme.md	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/samples/HCSR_app/Readme.md	2021-02-15 23:26:36.000000000 -0700
+@@ -0,0 +1,90 @@
++################################### READ ME FILE FOR PROJECT 1: CSE522 Spring 2021-Real Time Embedded Systems #############################################
++
++NAME: Sunjeet Jena
++ASUID: 1218420294
++
++##################### Building the source files #####################################################
++
++Unzip the the folder RTES-Jena-Sunjeet_01.zip and copy the folder the zephyr/samples
++
++Assuming the source files and the SDK has been exported. 
++Go inside the folder and run the following command in the terminal:
++
++$ mkdir build && cd build
++
++Inside the build folder run the following commands in the terminals
++
++$ cmake -GNinja -DBOARD=galileo ..
++
++$ ninja
++
++
++After this copy the zephyr.strip file from the /build/zephyr/zephyr.strip and place it in the /SDCARD/kernel folder
++
++Assuming that that the grub has already been copied, use the instructions below to run required experiments
++
++#################### Commands to run the experiments #################################################
++
++Assuming that the Galileo board has been booted
++
++--------------Running the RGB-Display Experiment  ----------------------------------
++
++In the command line run the command
++
++project1 RGB-display r1 g1 b1
++
++Replace r1,g1, b1 with the required duty cycles in % for the PWM (eg: 20 40 60)
++
++You should see the led blinking
++
++According to the project description it has been assumed that PCA9685’s PWM3, PWM5, and PWM7 are connected to the R, G, and B pins of the led.
++
++
++
++------------- Runing the Interrupt Latency Experiment ------------------------------
++
++In the command line run the following command to get the Interrupt latency in Nanoseconds over 'n' measurements
++
++project1 int-latency n
++
++Replace 'n' with the required number of measurements
++
++There will be an output everytime Interrupt Callback is called and the final output will show the average latency delay.
++
++
++The latency here is being measured using rdtsc() stamp counter difference and then multiplying with 2.5.
++
++*NOTE: You might see that you are getting an average of 0 the first time you run this experiment. This shouldn't happen in succesor experiments.
++
++
++
++
++------------- Runing the Context Switch Latency Experiment ------------------------------
++
++In the command line run the following command to get the Context Switch Latency in Nanoseconds over 'n' measurements
++
++project1 cs-latency n
++
++Replace 'n' with the required number of measurements
++
++The latency here is being measured using rdtsc() stamp counter difference and then multiplying with 2.5.
++
++*NOTE: There is One(1) second sleep inside every thread function, so giving higher 'n' values shall increase the time to get the required output. 
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
+diff -Naur ./old_zephyr/samples/HCSR_app/src/main.c ./zephyr/samples/HCSR_app/src/main.c
+--- ./old_zephyr/samples/HCSR_app/src/main.c	1969-12-31 17:00:00.000000000 -0700
++++ ./zephyr/samples/HCSR_app/src/main.c	2021-03-05 20:29:54.771602000 -0700
+@@ -0,0 +1,469 @@
++//Jai Shri Ram // Om Hum Hanumate Namah
++// Sunjeet Jena
++// CSE522 Real Time Embedded Systems Spring 2021 - Arizona State University
++// Assignment 2
++
++//-----------------Including the required libraries----------------------
++#include <zephyr.h>
++#include <device.h>
++#include <gpio.h>
++#include <pwm.h>
++#include <misc/util.h>
++#include <misc/printk.h>
++#include <shell/shell.h>
++#include <shell/shell_uart.h>
++#include <version.h>
++#include <pinmux.h>
++#include "../boards/x86/galileo/board.h"
++#include "../boards/x86/galileo/pinmux_galileo.h"
++#include "../drivers/gpio/gpio_dw_registers.h"
++#include "../drivers/gpio/gpio_dw.h"
++#include <stdlib.h>
++#include <sensor.h>
++
++#define DEBUG 
++
++#if defined(DEBUG) 
++	#define DPRINTK(fmt, args...) printk("DEBUG: %s():%d: " fmt, \
++   		 __func__, __LINE__, ##args)
++#else
++ 	#define DPRINTK(fmt, args...) /* do nothing if not defined*/
++#endif
++
++#define EDGE_FALLING    (GPIO_INT_EDGE | GPIO_INT_ACTIVE_LOW)
++#define EDGE_RISING		(GPIO_INT_EDGE | GPIO_INT_ACTIVE_HIGH)
++
++/* change this to enable pull-up/pull-down */
++#define PULL_UP 0
++
++/* Sleep time */
++#define SLEEP_TIME	1000
++
++/*Defining Sleep Time between two measurements */
++#define SLEEP_TIME_MEASUREMENTS 500
++
++//Defining the Thread Priority and the Stack Size
++#define MY_STACK_SIZE 1024
++#define MY_PRIORITY_HCSR0 4
++#define MY_PRIORITY_HCSR1 4
++
++
++// Defining the Stack for each thread of the device
++K_THREAD_STACK_DEFINE(my_stack_area_HCSR0, MY_STACK_SIZE);
++K_THREAD_STACK_DEFINE(my_stack_area_HCSR1, MY_STACK_SIZE);
++
++// Defining Timeout parameters in microseconds
++#define TIMEOUT_0 1000	//For HCSR0 device
++#define TIMEOUT_1 1000	//For HCSR1 device
++
++
++//-------------------------------Intializing Global the variables and struct variables----------------------------------
++int numberofMeasurements_=0;				//	Number of measurements to be collected
++
++int ND=0;									//	Number of Devices Selected
++
++int dist_Array_dev0[257];					//	Buffer to store the measured distances of the HCSR0 device
++u64_t timeStamp_Array_dev0[257];			//  Buffer to store the time stamp of the measured distances of the HCSR0 device
++int dist_Array_dev1[257];					//	Buffer to store the measured distances of the HCSR1 device
++u64_t timeStamp_Array_dev1[257];			//  Buffer to store the time stamp of the measured distances of the HCSR1 device
++
++// Arrays to be used for resetting the distance arrays and time stamp arrays in the dump function
++int dist_init[257];
++u64_t timestamp_init[257];
++
++// Declaring the struct Variables
++struct sensor_value sense_val_0; 			//	Variable to store sensor val(distance) of HCSR0 Device
++struct sensor_value sense_val_1; 			//	Variable to store sensor val(distance) of HCSR1 Device
++//-----------------------------------------------------------------------------------------------------------------------
++
++
++//------------------------Initializing thread variables and semaphores---------------------------------------------------
++// Initializing Thread Variables
++struct k_thread my_thread_HCSR0;
++struct k_thread my_thread_HCSR1;
++
++struct k_sem device_sem_HCSR0;
++struct k_sem device_sem_HCSR1;
++
++// RDTSC Function to get Time Stamp------------------------------------------------
++static __inline__ unsigned long long rdtsc(void){
++    unsigned int hi, lo;
++    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
++    return (((unsigned long long)lo) | (((unsigned long long)hi) << 32));
++}
++//---------------------------------------------------------------------------------
++
++extern void thread_HCSR0_funct(){
++
++	// Declaring variable to handle returns
++	int ret;
++	// Getting the parameters for number of measurements to be collected
++
++	// Recording the time when measurement was started;
++	u64_t start_measurement_timestamp=rdtsc();
++
++	//	Variable to read the time difference
++	u64_t timeDiff;	
++
++	// Fetching the Device Struct Pointer
++	struct device *dev=device_get_binding(CONFIG_HCSR04_0_NAME);
++
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_Config=dev->config;
++
++	// Iterating over then number of measurements specified by the user
++	for(int i=0;i<numberofMeasurements_;i++){
++
++		u64_t current_measurement_timestamp=rdtsc();
++
++		// Fetching a measured sample 
++		ret=sensor_sample_fetch(dev);
++		// Handling error Return
++		if(ret<0){
++			printk("Error caused while executing the sensor_sample_fetch() function of the device %s \n", dev_Config->name);
++			continue;
++		}
++		// Getting the sample data: Distance in centimeters and timestamp
++		ret=sensor_channel_get(dev,  SENSOR_CHAN_DISTANCE, &sense_val_0);
++		
++		// Handling error Return
++		if(ret<0){
++			printk("Error caused while executing the sensor_channel_get() function of the device %s \n", dev_Config->name);
++			// Negative Val from a sensor_channel_get() function will be cause if timeout duration has expired
++			// We write '-1' and 0 to buffer array, to indicate that the sensor_channel_get() failed for that particular measurement
++			dist_Array_dev0[i]=-1;
++			timeStamp_Array_dev0[i]=0;
++			k_sleep(SLEEP_TIME_MEASUREMENTS);
++			continue;
++		}
++		// Saving the distance in the array
++		dist_Array_dev0[i]=sense_val_0.val1;
++
++		// Time difference in microseconds
++		timeDiff=(current_measurement_timestamp- start_measurement_timestamp)/400;
++
++		// Saving the time stamp in the array in microseconds seconds
++		timeStamp_Array_dev0[i]=timeDiff;
++
++		// Sleep for 500 Milliseconds (0.5 Seconds);
++		k_sleep(SLEEP_TIME_MEASUREMENTS);
++
++	}
++	// Giving the semaphore back the start_measurement() function
++	k_sem_give(&device_sem_HCSR0);
++
++}
++
++// ----------------HCSR1 device Thread --------------------------------------------
++extern void thread_HCSR1_funct(){
++
++	// Declaring variable to handle returns
++	int ret;
++	// Getting the parameters for number of measurements to be collected
++
++	// Recording the time when measurement was started;
++	u64_t start_measurement_timestamp=rdtsc();
++
++	//	Variable to read the time difference
++	u64_t timeDiff;	
++
++	// Fetching the Device Struct Pointer
++	struct device *dev=device_get_binding(CONFIG_HCSR04_1_NAME);
++
++	//Getting the address to the HCSR device config struct
++	struct device_config* dev_Config=dev->config;
++
++
++	// Iterating over then number of measurements specified by the user
++	for(int i=0;i<numberofMeasurements_;i++){
++
++		// Fetching the timestamp of the current measurement
++		u64_t current_measurement_timestamp=rdtsc();
++
++		// Fetching a measured sample 
++		ret=sensor_sample_fetch(dev);
++
++		// Handling error Return
++		if(ret<0){
++			printk("Error caused while executing the sensor_sample_fetch() function of the device %s \n", dev_Config->name);
++			continue;
++		}
++		// Getting the sample data: Distance in centimeters and timestamp
++		ret=sensor_channel_get(dev,  SENSOR_CHAN_DISTANCE, &sense_val_1);
++		
++		// Handling error Return
++		if(ret<0){
++			printk("Error caused while executing the sensor_channel_get() function of the device %s \n", dev_Config->name);
++			// Negative Val from a sensor_channel_get() function will be cause if timeout duration has expired
++			// We write '-1' and 0 to buffer array, to indicate that the sensor_channel_get() failed for that particular measurement
++			dist_Array_dev1[i]=-1;
++			timeStamp_Array_dev1[i]=0;
++			k_sleep(SLEEP_TIME_MEASUREMENTS);
++			continue;
++		}
++		// Saving the distance in the array
++		dist_Array_dev1[i]=sense_val_1.val1;
++
++		// Time difference in microseconds
++		timeDiff=(current_measurement_timestamp- start_measurement_timestamp)/400;
++
++		// Saving the time stamp in the array in microseconds seconds
++		timeStamp_Array_dev1[i]=timeDiff;
++
++		// Sleep for 500 Milliseconds (0.5 Seconds);
++		k_sleep(SLEEP_TIME_MEASUREMENTS);
++
++	}
++	// Giving the semaphore back the start_measurement() function
++	k_sem_give(&device_sem_HCSR1);
++
++}
++
++
++
++//--------------------------Function for selection of devices ----------------------
++static int select_devices(const struct shell *shell, size_t argc, char **argv){
++
++	// Getting the option value
++	int option_config=atoi(*(argv+1));
++
++	// Selecting 0 Devices
++	if(option_config==0){
++		ND=0;
++		printk("No devices have been selected. \n");
++	}
++	// Selecting HCSR_0 device
++	else if(option_config==1){
++		ND=1;
++		printk("HCSR_0 device been selected. \n");
++	}
++	// Selecting HCSR_1 device
++	else if(option_config==2){
++		ND=2;
++		printk("HCSR_1 device been selected. \n");
++	}
++	// Selecting HCSR_0 and HCSR_1 device
++	else if(option_config==3){
++		ND=3;
++		printk("HCSR_0 and HCSR_1 devices been selected. \n");
++	}
++	// Condition to handle invalid option
++	else{
++		printk("Please Select a Value Between 0-3 \n");
++	}
++	return 0;
++}
++//----------------------------------------------------------------------------------
++
++//------------------------Function for starting the measurements--------------------
++static int start_measurement(const struct shell *shell, size_t argc, char **argv){
++
++	// Declaring variable to handle returns
++	// int ret;
++
++	// Getting the parameters for number of measurements to be collected
++	numberofMeasurements_=atoi(*(argv+1));
++	// // Recording the time when measurement was started;
++	// start_measurement_timestamp=rdtsc();
++
++	// // Fetching the Device Struct Pointer
++	// struct device *dev=device_get_binding(CONFIG_HCSR04_1_NAME);
++
++	// //Getting the address to the HCSR device config struct
++	// const struct device_config* dev_Config=dev->config;
++
++	// // Iterating over then number of measurements specified by the user
++	// for(int i=0;i<numberofMeasurements_;i++){
++	// 	// Fetching a measured sample 
++	// 	ret=sensor_sample_fetch(dev);
++
++	// 	// Handling error Return
++	// 	if(ret<0){
++	// 		printk("Error caused while executing the sensor_sample_fetch() function of the device %s \n", dev_Config->name);
++	// 		continue;
++	// 	}
++	// 	// Getting the sample data: Distance in centimeters and timestamp
++	// 	ret=sensor_channel_get(dev,  SENSOR_CHAN_DISTANCE, &sense_val_1);
++		
++	// 	// Handling error Return
++	// 	if(ret<0){
++	// 		printk("Error caused while executing the sensor_channel_get() function of the device %s \n", dev_Config->name);
++	// 		// Negative Val from a sensor_channel_get() function will be cause if timeout duration has expired
++	// 		// We write '-1' and 0 to buffer array, to indicate that the sensor_channel_get() failed for that particular measurement
++	// 		dist_Array_dev1[i]=-1;
++	// 		timeStamp_Array_dev1[i]=0;
++	// 		k_sleep(SLEEP_TIME_MEASUREMENTS);
++	// 		continue;
++	// 	}
++	// 	// Saving the distance in the array
++	// 	dist_Array_dev1[i]=sense_val_1.val1;
++
++	// 	// Time difference in microseconds
++	// 	timeDiff=(sense_val_1.val2 - start_measurement_timestamp)/(400);
++
++	// 	// Saving the time stamp in the array in microseconds seconds
++	// 	timeStamp_Array_dev1[i]=timeDiff;
++
++	// 	// Sleep for 500 Milliseconds (0.5 Seconds);
++	// 	k_sleep(SLEEP_TIME_MEASUREMENTS);
++
++	// }
++
++	if(ND==0){
++
++		printk("No Devices have been selected. Please select devices(s) using \"select\" command. \n");
++		return 0;
++
++
++	}
++	else{
++
++		printk("Distance Measurement Collection Started......\n");
++
++		// Initializing the semaphore variable for HCSR0 device
++		if(ND==1 || ND == 3){
++			k_sem_init(&device_sem_HCSR0, 0, 1);
++		}
++
++		// Initializing the semaphore variable for HCSR0 device
++		if(ND==2 || ND == 3){
++			k_sem_init(&device_sem_HCSR1, 0, 1);		
++		}
++		
++		// Initializing thread variable for HCSR0 and HCSR1 devices
++		k_tid_t my_tid_HCSR0;
++		k_tid_t my_tid_HCSR1;
++
++
++		// Creating a thread for HCSR0 device
++		if(ND==1 || ND == 3){
++			my_tid_HCSR0=k_thread_create(&my_thread_HCSR0, my_stack_area_HCSR0,
++			                       K_THREAD_STACK_SIZEOF(my_stack_area_HCSR0),
++			                       thread_HCSR0_funct,
++			                       NULL, NULL, NULL,
++			                       MY_PRIORITY_HCSR0, 0, K_NO_WAIT);
++
++		}
++		// Creating a thread for HCSR1 device
++		if(ND==2 || ND == 3){
++			my_tid_HCSR1=k_thread_create(&my_thread_HCSR1, my_stack_area_HCSR1,
++			                       K_THREAD_STACK_SIZEOF(my_stack_area_HCSR1),
++			                       thread_HCSR1_funct,
++			                       NULL, NULL, NULL,
++			                       MY_PRIORITY_HCSR1, 0, K_NO_WAIT);
++
++		}
++		
++		// Semaphore wait for the HCSR0 device
++		if(ND==1 || ND == 3){
++			k_sem_take(&device_sem_HCSR0, K_FOREVER);
++		
++		}
++		// Semaphore wait for the HCSR1 device
++		if(ND==2 || ND == 3){
++			k_sem_take(&device_sem_HCSR1, K_FOREVER);
++		}
++		printk("Distance Measurement Collection Ended\n");
++		return 0;
++	}
++}
++//----------------------------------------------------------------------------------
++
++//-----------------------Function to print/dump data ------------------------------
++static int dump_data(const struct shell *shell, size_t argc, char **argv){
++// Function to get the store the data: Device Name, Measured Distances, and the respective time stamp
++
++	// Getting the parameters for the range of measurements to be dumped
++	// Current Assumption is that 'p1' has a minimum value of 0, meaning first measurement is indexed as '0' (zero)
++	int p1=atoi(*(argv+1));
++	int p2=atoi(*(argv+2));
++
++	// Setting up the header labels for the Output 
++	printk("%s \t %s \t %s \n", "DEVICE NAME","DISTANCE IN CENTIMETERS", "TIME STAMP (in microseconds)");
++	printk("%s \n", "---------------------------------------------------------------------------------");
++	
++
++	// Fetching the Device Struct Pointer to HCSR0 Device
++	const struct device *dev0=device_get_binding(CONFIG_HCSR04_0_NAME);
++	//Getting the address to the HCSR device config struct
++	const struct device_config* dev_Config_0=dev0->config;
++
++
++	// Fetching the Device Struct Pointer to HCSR1 Device
++	const struct device *dev1=device_get_binding(CONFIG_HCSR04_1_NAME);
++	//Getting the address to the HCSR device config struct
++	const struct device_config* dev_Config_1=dev1->config;
++
++	// Fetching the Device Specific Buffer Data
++	for(int c_=p1;c_<=p2;c_++){
++		// Printing out the necessary Data (Ignore the formatting )
++		if(ND==1 || ND == 3){
++			printk("%s \t\t %d \t \t \t %llu \n", dev_Config_0->name, dist_Array_dev0[c_], timeStamp_Array_dev0[c_]);
++		}
++		if(ND==2 || ND == 3){
++			printk("%s \t\t %d \t \t \t %llu \n", dev_Config_1->name, dist_Array_dev1[c_], timeStamp_Array_dev1[c_]);
++		}
++	}
++	return 0;
++}
++//------------------------------------------------------------------------------------------
++
++//-------------------------Function to clear internal data-----------------------------------
++static int clear_buffer(const struct shell *shell, size_t argc, char **argv){
++// Function to clear the internal buffer 
++
++
++	// Resetting the Internal Buffer of the HCSR0 devices
++	memcpy(dist_Array_dev0, dist_init, sizeof dist_Array_dev0);
++	memcpy(timeStamp_Array_dev0, timestamp_init, sizeof timeStamp_Array_dev0);
++
++	// Resetting the Internal Buffer of the HCSR1 devices
++	memcpy(dist_Array_dev1, dist_init, sizeof dist_Array_dev1);
++	memcpy(timeStamp_Array_dev1, timestamp_init, sizeof timeStamp_Array_dev1);
++	return 0;
++}
++
++//---------------------------------------------------------------------------------------------
++
++
++
++//----------------------------------------Registering Shell Commands----------------------------
++SHELL_STATIC_SUBCMD_SET_CREATE(exp,
++	SHELL_CMD(select, NULL, "Number of HCSR Devices to be Set", select_devices),
++	SHELL_CMD(start, NULL, "Start the Measurements", start_measurement),
++	SHELL_CMD(dump,  NULL, "Print out the data", dump_data),
++	SHELL_CMD(clear,  NULL, "Clear the Internal Buffer", clear_buffer),
++	SHELL_SUBCMD_SET_END /* Array terminated. */
++);
++
++SHELL_CMD_REGISTER(HCSR, &exp, "Select a Function", NULL);
++//----------------------------------------------------------------------------------------------
++
++
++//-----------------------------------Main Function-----------------------------------------
++void main(void)
++{	
++	// Main function only contains commands to set the timeout parameter of the devices
++
++	//---Setting the Timeout parameter of Device 0---------------	
++	struct device *dev0=device_get_binding(CONFIG_HCSR04_0_NAME);
++	
++	//Initialize the attribute
++	struct sensor_value sense_attr_0;
++	
++	sense_attr_0.val1= TIMEOUT_0;
++
++	//Calling the sensor_attr_set() function
++	sensor_attr_set(dev0, SENSOR_CHAN_DISTANCE, 1, &sense_attr_0);
++
++	//---Setting the Timeout parameter of Device 1---------------	
++	struct device *dev1=device_get_binding(CONFIG_HCSR04_1_NAME);
++	
++	//Initialize the attribute
++	struct sensor_value sense_attr_1;
++	
++	sense_attr_1.val1= TIMEOUT_1;
++
++	//Calling the sensor_attr_set() function
++	sensor_attr_set(dev1, SENSOR_CHAN_DISTANCE, 1, &sense_attr_1);
++}

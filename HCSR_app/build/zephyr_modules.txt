@@ -1,0 +1,1 @@
+"tinycbor":"/home/sunjeet/zephyrproject/modules/lib/tinycbor"

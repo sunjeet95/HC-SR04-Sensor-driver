@@ -1,0 +1,127 @@
+/dts-v1/;
+/ {
+ #address-cells = <1>;
+ #size-cells = <1>;
+ chosen { };
+ aliases { };
+};
+/ {
+ cpus {
+  #address-cells = <1>;
+  #size-cells = <0>;
+  cpu@0 {
+   device_type = "cpu";
+   compatible = "quark_x1000";
+   reg = <0>;
+  };
+  intc: ioapic@fec00000 {
+   compatible = "intel,ioapic";
+   reg = <0xfec00000 0x100000>;
+   interrupt-controller;
+   #interrupt-cells = <3>;
+  };
+ };
+ flash0: flash@100000{
+  compatible = "soc-nv-flash";
+  reg = <0x00100000 ((1024) * 1024)>;
+ };
+ sram0: memory@400000 {
+  device_type = "memory";
+  compatible = "mmio-sram";
+  reg = <0x00400000 ((32) * 1024 * 1024)>;
+ };
+ soc {
+  #address-cells = <1>;
+  #size-cells = <1>;
+  compatible = "simple-bus";
+  ranges;
+  uart0: uart@9000f000 {
+   compatible = "ns16550";
+   reg = <0x9000f000 0x400>;
+   label = "UART_0";
+   clock-frequency = <44236800>;
+   interrupts = <0 (0x00008000 | 0x00002000) 0>;
+   interrupt-parent = <&intc>;
+   status = "disabled";
+  };
+  uart1: uart@9000b000 {
+   compatible = "ns16550";
+   reg = <0x9000b000 0x400>;
+   label = "UART_1";
+   clock-frequency = <44236800>;
+   interrupts = <17 (0x00008000 | 0x00002000) 3>;
+   interrupt-parent = <&intc>;
+   status = "disabled";
+  };
+  i2c0: i2c@90007000 {
+   compatible = "snps,designware-i2c";
+   clock-frequency = <100000>;
+   #address-cells = <1>;
+   #size-cells = <0>;
+   reg = <0x90007000 0x400>;
+   interrupts = <18 (0x00008000 | 0x00002000) 2>;
+   interrupt-parent = <&intc>;
+   label = "I2C_0";
+   status = "disabled";
+  };
+  spi0: spi@90009000 {
+   compatible = "intel,intel-spi";
+   reg = <0x90009000 0x400>;
+   #address-cells = <1>;
+   #size-cells = <0>;
+   interrupts = <16 (0x00000000 | 0x00000000) 2>;
+   interrupt-parent = <&intc>;
+   label = "SPI_0";
+   status = "disabled";
+  };
+  spi1: spi@90008000 {
+   compatible = "intel,intel-spi";
+   reg = <0x90008000 0x400>;
+   #address-cells = <1>;
+   #size-cells = <0>;
+   interrupts = <17 (0x00000000 | 0x00000000) 2>;
+   interrupt-parent = <&intc>;
+   label = "SPI_1";
+   status = "disabled";
+  };
+ };
+ sharedirq0: sharedirq0 {
+  compatible = "shared-irq";
+  label = "SHARED_IRQ0";
+  interrupts = <18 (0x00008000 | 0x00002000) 2>;
+  interrupt-parent = <&intc>;
+  status = "disabled";
+ };
+};
+/ {
+ model = "galileo";
+ compatible = "intel,quark_x1000";
+ aliases {
+  uart-0 = &uart0;
+  uart-1 = &uart1;
+ };
+ chosen {
+  zephyr,sram = &sram0;
+  zephyr,flash = &flash0;
+  zephyr,console = &uart1;
+  zephyr,shell-uart = &uart1;
+ };
+};
+&uart0 {
+ status = "ok";
+ current-speed = <115200>;
+};
+&uart1 {
+ status = "ok";
+ current-speed = <115200>;
+};
+&i2c0 {
+ status = "ok";
+ clock-frequency = <400000>;
+};
+&spi0 {
+ status = "ok";
+};
+&sharedirq0 {
+ status = "ok";
+};
