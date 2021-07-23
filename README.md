@@ -1,15 +1,15 @@
 # HC-SR04-Sensor-driver
 This code repository contains a device driver for HCSR04 Ultrasonic sensor and an application to successfully run two HCSR04 sensors using that device driver in ZEPHYR RTOS and Intel Galileo Board 2. The devices work only in one shot mode and the output are the distances in centimeters, the timestamp of the measurement in microseconds and the device name.
 
--Requirements:
+**Requirements:**
 
-  -Zephyr RTOS Version 1.14.1 (https://docs.zephyrproject.org/1.14.1/).
-  -Intel Galileo Board 2.
-  -Two HC-SR04 sensors.
+  - Zephyr RTOS Version 1.14.1 (https://docs.zephyrproject.org/1.14.1/)
+  - Intel Galileo Board 2
+  - Two HC-SR04 sensors
 
 ## Patching the source file and Building the Source Code ##
 
-**Unzip the the folder RTES-Jena-Sunjeet_02.zip and copy the patch file hcsr04.patch to the directory where the zephyr folder is location. Make sure that hcsr04.patch and zephyr root directory are located in the same folder.**
+**Unzip the the .zip folder from the git and copy the patch file hcsr04.patch to the directory where the zephyr folder is located. Make sure that hcsr04.patch and zephyr root directory are located in the same folder.**
 
 1) Patch the source code using the command:
 
@@ -32,9 +32,9 @@ Assuming the source files and the SDK has been exported.
 `$ ninja
 `
 
-4) After this copy the **zephyr.strip** file from the** /build/zephyr/zephyr.strip** and place it in the **/SDCARD/kernel** folder.
+4) After this copy the **zephyr.strip** file from the **/build/zephyr/zephyr.strip** and place it in the **/SDCARD/kernel** folder.
 
-5) Assuming that that the grub has already been copied, use the instructions below to run required experiments.
+5) Assuming that the grub has already been copied, use the instructions below to run required experiments.
 
 ## Commands to run the experiments
 
@@ -46,12 +46,12 @@ Assuming that the Galileo board has been booted
 
 In the command line run the command :
 
-`$ HCSR start n
+`$ HCSR select n
 `
 
 Replace n with 0, 1, 2, 3
 
-0 - No Devices Selected
+0- No Devices Selected
 1- HCSR0 device was selected
 2- HCSR1 device was selected
 3- Both devices were selected
@@ -69,8 +69,7 @@ Incase there is a timeout in any of the devices, you may see "Error" messages in
 
 The distances measured by the devices are in centimeters.
 
-*Note: 'n' shoudld be less than or equal to 256.
-
+***Note: 'n' shoudld be less than or equal to 256.***
 
 ###### Printing the collected samples
 
